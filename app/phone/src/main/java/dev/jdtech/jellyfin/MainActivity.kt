@@ -7,16 +7,27 @@ import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
+import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.compose.rememberNavController
 import dagger.hilt.android.AndroidEntryPoint
+import dev.jdtech.jellyfin.offline.queue.DownloadQueueRecovery
+import dev.jdtech.jellyfin.offline.queue.DownloadQueueScheduler
 import dev.jdtech.jellyfin.presentation.theme.FindroidTheme
 import dev.jdtech.jellyfin.presentation.utils.LocalOfflineMode
 import dev.jdtech.jellyfin.viewmodels.MainViewModel
+import javax.inject.Inject
+import kotlinx.coroutines.launch
+import timber.log.Timber
 
 @AndroidEntryPoint
 class MainActivity : AppCompatActivity() {
     private val viewModel: MainViewModel by viewModels()
+    private var didResumeInterruptedDownloads = false
+
+    @Inject lateinit var downloadQueueRecovery: DownloadQueueRecovery
+
+    @Inject lateinit var downloadQueueScheduler: DownloadQueueScheduler
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -39,6 +50,25 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             }
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        if (didResumeInterruptedDownloads) return
+        didResumeInterruptedDownloads = true
+        lifecycleScope.launch {
+            runCatching {
+                    val report = downloadQueueRecovery.run()
+                    if (report.hasPendingWork) downloadQueueScheduler.kick()
+                    Timber.i(
+                        "Foreground download queue recovery: reset=%d reclaimed=%d pending=%s",
+                        report.resetDownloading,
+                        report.reclaimedRetries,
+                        report.hasPendingWork,
+                    )
+                }
+                .onFailure { error -> Timber.e(error, "Foreground download queue recovery failed") }
         }
     }
 }
