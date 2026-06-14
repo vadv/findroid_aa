@@ -22,11 +22,17 @@ import coil3.request.crossfade
 import coil3.svg.SvgDecoder
 import com.google.android.material.color.DynamicColors
 import dagger.hilt.android.HiltAndroidApp
+import dev.jdtech.jellyfin.offline.queue.DownloadQueueRecovery
+import dev.jdtech.jellyfin.offline.queue.DownloadQueueScheduler
 import dev.jdtech.jellyfin.settings.domain.AppPreferences
 import dev.jdtech.jellyfin.work.MpvCleanupWorker
 import dev.jdtech.jellyfin.work.SyncWorker
 import javax.inject.Inject
 import kotlin.time.ExperimentalTime
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import okio.Path.Companion.toOkioPath
 import timber.log.Timber
 
@@ -35,6 +41,12 @@ class BaseApplication : Application(), Configuration.Provider, SingletonImageLoa
     @Inject lateinit var appPreferences: AppPreferences
 
     @Inject lateinit var workerFactory: HiltWorkerFactory
+
+    @Inject lateinit var downloadQueueRecovery: DownloadQueueRecovery
+
+    @Inject lateinit var downloadQueueScheduler: DownloadQueueScheduler
+
+    private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override val workManagerConfiguration: Configuration
         get() = Configuration.Builder().setWorkerFactory(workerFactory).build()
@@ -65,6 +77,7 @@ class BaseApplication : Application(), Configuration.Provider, SingletonImageLoa
 
         scheduleUserDataSync(workManager)
         scheduleMpvCleanup(workManager)
+        runDownloadQueueRecovery()
     }
 
     @OptIn(ExperimentalCoilApi::class, ExperimentalTime::class)
@@ -124,5 +137,21 @@ class BaseApplication : Application(), Configuration.Provider, SingletonImageLoa
             existingWorkPolicy = ExistingWorkPolicy.KEEP,
             request = cleanupRequest
         )
+    }
+
+    private fun runDownloadQueueRecovery() {
+        applicationScope.launch {
+            runCatching {
+                    val report = downloadQueueRecovery.run()
+                    if (report.hasPendingWork) downloadQueueScheduler.kick()
+                    Timber.i(
+                        "Cold-start download queue recovery: reset=%d reclaimed=%d pending=%s",
+                        report.resetDownloading,
+                        report.reclaimedRetries,
+                        report.hasPendingWork,
+                    )
+                }
+                .onFailure { error -> Timber.e(error, "Cold-start download queue recovery failed") }
+        }
     }
 }
